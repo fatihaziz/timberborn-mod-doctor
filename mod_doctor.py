@@ -306,7 +306,7 @@ def _looks_external(folder: Path) -> bool:
     return "bepinex" in names or "winhttp.dll" in names or "doorstop_config.ini" in names
 
 
-def normalize_version_dirs(apply: bool) -> list[dict]:
+def normalize_version_dirs(apply: bool, legacy_status: dict | None = None) -> list[dict]:
     """Give each FLAT native mod a version-<MinimumGameVersion> dir so the game's own
     loader selects it. Per Timberborn.Modding.ModRepository: if a mod folder has any
     'version-*' subdir the root is ignored, and the game loads the HIGHEST version-*
@@ -332,12 +332,27 @@ def normalize_version_dirs(apply: bool) -> list[dict]:
         man = read_json(folder / "manifest.json")
         if not isinstance(man, dict):
             if (folder / "mod.json").exists():
-                detail = ("legacy TimberAPI package -> a version directory alone cannot port "
-                          "its schema or compiled code. See LEGACY COMPATIBILITY; "
-                          "--repair-legacy migrates supported data-only Specifications to "
-                          "native 1.x Blueprints.")
-                items.append({"sev": "warn", "label": f"migration needed {name}",
-                              "detail": detail})
+                profile = (legacy_status or {}).get(name)
+                if profile and profile.get("repairable"):
+                    items.append({
+                        "sev": "action", "label": f"auto-fixable {name}",
+                        "detail": "legacy TimberAPI package with a known migration path -> "
+                                  "run --fix (or press f / the FIX ALL NOW button in the "
+                                  "TUI) to migrate it now.",
+                    })
+                elif profile:
+                    items.append({
+                        "sev": "warn", "label": f"cannot auto-fix {name}",
+                        "detail": "legacy TimberAPI package with NO safe migration path: "
+                                  + profile["reason"] + ". Forcing a manifest onto it would "
+                                  "crash the game, not fix the mod. Waiting on an author/"
+                                  "source rebuild; see LEGACY COMPATIBILITY.",
+                    })
+                else:
+                    items.append({
+                        "sev": "warn", "label": f"legacy package {name}",
+                        "detail": "legacy TimberAPI package -> see LEGACY COMPATIBILITY.",
+                    })
             else:
                 detail = ("no manifest.json or mod.json at root -> not a loadable mod (a stray "
                           "folder, or a mod nested one level too deep); not wrapping")
@@ -1154,7 +1169,7 @@ def action_items(actions, applied):
     return items
 
 
-def summary_items(diagnoses, actions, applied):
+def summary_items(diagnoses, actions, applied, unfixable=None):
     disable = [a for a in actions if a["kind"] == "disable"]
     dedup = [a for a in actions if a["kind"] == "dedup"]
     repaired = [a for a in actions if a["kind"] == "repair_legacy"]
@@ -1174,6 +1189,15 @@ def summary_items(diagnoses, actions, applied):
                       "label": f"{len(synced)} synced mod(s) -> re-download unless unsubscribed",
                       "detail": "\n".join(f"{a['mod']['name']}: {source_note(a['mod'])}"
                                           for a in synced)})
+    if unfixable:
+        names = ", ".join(p["mod"]["name"] for p in unfixable)
+        items.append({
+            "sev": "warn",
+            "label": f"{len(unfixable)} package(s) cannot be auto-fixed by ANY tool run",
+            "detail": f"{names}\nTheir compiled code/assets target a pre-1.0 game; only "
+                      "an author/source rebuild can port them. mod_doctor refuses to fake "
+                      "a manifest that would crash the game.",
+        })
     if actions and applied:
         v, s = "Applied. Relaunch the game to verify.", "ok"
     elif actions:
@@ -1259,25 +1283,38 @@ Collapsible { border: none; padding: 0 0 0 1; }
 .warn { color: #e5c07b; }
 .crash { color: #e06c75; text-style: bold; }
 .action { color: #c678dd; }
+.fixbar { width: 100%; text-style: bold; }
+.fixdone { color: #98c379; padding: 0 0 0 1; }
 """
 
 
-def _build_tui_app(meta, sections):
+def _build_tui_app(meta, sections, pending=0):
     """Construct (but don't run) the Textual review app -- factory-style so it can be
-    exercised headlessly via App.run_test()."""
+    exercised headlessly via App.run_test(). `pending` = plannable actions not yet
+    applied; when > 0 the app shows a FIX ALL NOW button (and the f binding) that
+    exits with .fix_requested = True so the caller applies and re-renders."""
     from textual.app import App
     from textual.containers import VerticalScroll
-    from textual.widgets import Header, Footer, Static, Collapsible
+    from textual.widgets import Header, Footer, Static, Collapsible, Button
 
     class DoctorTUI(App):
         TITLE = "mod_doctor"
         SUB_TITLE = "click a row to expand -- e/c expand/collapse all, q quit"
         CSS = _TUI_CSS
         BINDINGS = [("q", "quit", "Quit"), ("e", "expand_all", "Expand all"),
-                    ("c", "collapse_all", "Collapse all")]
+                    ("c", "collapse_all", "Collapse all"),
+                    ("f", "fix_all", "FIX ALL NOW")]
+        fix_requested = False
 
         def compose(self):
             yield Header()
+            if pending:
+                yield Button(f"FIX ALL NOW  --  apply {pending} pending action(s)",
+                             id="fix", variant="error", classes="fixbar")
+            else:
+                yield Static("  nothing left to auto-fix -- remaining findings need "
+                             "an author/source rebuild", markup=False,
+                             classes="fixdone")
             with VerticalScroll():
                 for line in meta:
                     yield Static(line, markup=False, classes="meta")
@@ -1296,6 +1333,15 @@ def _build_tui_app(meta, sections):
                             collapsed=True, classes=it["sev"])
             yield Footer()
 
+        def on_button_pressed(self, event):
+            if event.button.id == "fix":
+                self.action_fix_all()
+
+        def action_fix_all(self):
+            if pending:
+                self.fix_requested = True
+                self.exit()
+
         def action_expand_all(self):
             for cw in self.query(Collapsible):
                 cw.collapsed = False
@@ -1307,8 +1353,11 @@ def _build_tui_app(meta, sections):
     return DoctorTUI()
 
 
-def render_tui(meta, sections):
-    _build_tui_app(meta, sections).run()
+def render_tui(meta, sections, pending=0):
+    """Run the TUI; True when the user pressed FIX ALL NOW."""
+    app = _build_tui_app(meta, sections, pending)
+    app.run()
+    return app.fix_requested
 
 
 # --------------------------------------------------------------------------- #
@@ -1806,70 +1855,86 @@ def main(argv=None):
               "or set the TIMBERBORN_MODS environment variable.", file=sys.stderr)
         return 2
 
-    meta = [f"Mods dir     : {MODS}",
-            f"Error reports: {ER}",
-            f"Game managed : {GAME}  ({'found' if GAME.exists() else 'NOT FOUND'})",
-            f"Game version : {'.'.join(map(str, GAMEV))}"]
-    sections = []
+    while True:
+        meta = [f"Mods dir     : {MODS}",
+                f"Error reports: {ER}",
+                f"Game managed : {GAME}  ({'found' if GAME.exists() else 'NOT FOUND'})",
+                f"Game version : {'.'.join(map(str, GAMEV))}"]
+        sections = []
 
-    sections.append(("VERSION DIRECTORIES", normalize_version_dirs(apply=args.apply)))
+        mods = active_mods()
+        loaded = sum(1 for m in mods if m["is_loaded"])
+        meta.append(f"Mod folders  : {len(mods)} present, {loaded} loaded by the game")
 
-    mods = active_mods()
-    loaded = sum(1 for m in mods if m["is_loaded"])
-    meta.append(f"Mod folders  : {len(mods)} present, {loaded} loaded by the game")
+        legacy_profiles = _coordinate_legacy_profiles(
+            [_legacy_profile(mod) for mod in legacy_mods(mods)])
+        legacy_status = {p["mod"]["folder"].name: p for p in legacy_profiles}
+        unfixable = [p for p in legacy_profiles if not p["repairable"]]
 
-    sections.append(("GAME COMPATIBILITY (AssemblyRef scan)", compat_report(mods)))
-    legacy_profiles = _coordinate_legacy_profiles(
-        [_legacy_profile(mod) for mod in legacy_mods(mods)])
-    sections.append(("LEGACY COMPATIBILITY", legacy_compat_items(legacy_profiles)))
+        sections.append(("VERSION DIRECTORIES",
+                         normalize_version_dirs(apply=args.apply,
+                                                legacy_status=legacy_status)))
+        sections.append(("GAME COMPATIBILITY (AssemblyRef scan)", compat_report(mods)))
+        sections.append(("LEGACY COMPATIBILITY", legacy_compat_items(legacy_profiles)))
 
-    reports, player_note = [], False
-    if not args.no_crash:
-        zips = sorted(ER.glob("error-report-*.zip"),
-                      key=lambda p: p.stat().st_mtime, reverse=True)
-        if args.reports > 0:
-            zips = zips[:args.reports]
-        reports = [(zp.name, *load_report(zp)[1:]) for zp in zips]
-        if not reports:
-            pl = scan_player_log()
-            if pl:
-                reports, player_note = [pl], True
+        reports, player_note = [], False
+        if not args.no_crash:
+            zips = sorted(ER.glob("error-report-*.zip"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+            if args.reports > 0:
+                zips = zips[:args.reports]
+            reports = [(zp.name, *load_report(zp)[1:]) for zp in zips]
+            if not reports:
+                pl = scan_player_log()
+                if pl:
+                    reports, player_note = [pl], True
 
-    diagnoses, actions = build_plan(mods, reports, args.force)
-    if args.no_dedup:
-        actions = [a for a in actions if a["kind"] != "dedup"]
-    if args.repair_legacy:
-        planned = {a["mod"]["folder"] for a in actions}
-        archive = dated_archive_dir()
-        for profile in legacy_profiles:
-            mod = profile["mod"]
-            if not profile["repairable"] or mod["folder"] in planned:
+        diagnoses, actions = build_plan(mods, reports, args.force)
+        if args.no_dedup:
+            actions = [a for a in actions if a["kind"] != "dedup"]
+        repairable = [p for p in legacy_profiles if p["repairable"]]
+        if args.repair_legacy:
+            planned = {a["mod"]["folder"] for a in actions}
+            archive = dated_archive_dir()
+            for profile in repairable:
+                mod = profile["mod"]
+                if mod["folder"] in planned:
+                    continue
+                actions.append({
+                    "kind": "repair_legacy",
+                    "mod": mod,
+                    "dest_parent": archive,
+                    "reason": profile["reason"],
+                    "warn": None,
+                    "profile": profile,
+                })
+
+        if not args.no_crash:
+            sections.append(("CRASH TRIAGE", diag_items(diagnoses, player_note)))
+
+        if args.apply:
+            apply_actions(actions)
+        verb = "APPLIED" if args.apply else "PLANNED (dry-run; --apply to perform)"
+        sections.append((f"ACTIONS {verb}", action_items(actions, args.apply)))
+        sections.append(("SUMMARY",
+                         summary_items(diagnoses, actions, args.apply, unfixable)))
+        if args.apply:
+            sections.append(("VERIFY", verify_items()))
+
+        # Pending work the TUI's FIX ALL NOW button can still trigger: planned (but
+        # unapplied) actions, plus repairable legacy packages when --repair-legacy
+        # wasn't requested yet.
+        pending = 0 if args.apply else len(actions)
+        if not args.repair_legacy:
+            pending += len(repairable)
+
+        if _use_tui(args):
+            if render_tui(meta, sections, pending):
+                args.apply = args.repair_legacy = args.force = True
                 continue
-            actions.append({
-                "kind": "repair_legacy",
-                "mod": mod,
-                "dest_parent": archive,
-                "reason": profile["reason"],
-                "warn": None,
-                "profile": profile,
-            })
-
-    if not args.no_crash:
-        sections.append(("CRASH TRIAGE", diag_items(diagnoses, player_note)))
-
-    if args.apply:
-        apply_actions(actions)
-    verb = "APPLIED" if args.apply else "PLANNED (dry-run; --apply to perform)"
-    sections.append((f"ACTIONS {verb}", action_items(actions, args.apply)))
-    sections.append(("SUMMARY", summary_items(diagnoses, actions, args.apply)))
-    if args.apply:
-        sections.append(("VERIFY", verify_items()))
-
-    if _use_tui(args):
-        render_tui(meta, sections)
-    else:
-        render_plain(meta, sections, args.details)
-    return 0
+        else:
+            render_plain(meta, sections, args.details)
+        return 0
 
 
 if __name__ == "__main__":
