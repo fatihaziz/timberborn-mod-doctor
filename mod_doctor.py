@@ -1173,6 +1173,7 @@ def summary_items(diagnoses, actions, applied, unfixable=None):
     disable = [a for a in actions if a["kind"] == "disable"]
     dedup = [a for a in actions if a["kind"] == "dedup"]
     repaired = [a for a in actions if a["kind"] == "repair_legacy"]
+    dead = [a for a in actions if a["kind"] == "archive_dead"]
     stale = [d for d in diagnoses if d.get("stale")]
     transient = [d for d in diagnoses if d["cls"] == "transient"]
     acted = {a["mod"]["folder"] for a in actions}
@@ -1180,8 +1181,9 @@ def summary_items(diagnoses, actions, applied, unfixable=None):
               and not any(c["folder"] in acted for c in d["culprits"])]
     items = [{"sev": "info",
               "label": f"disable {len(disable)} | dedup {len(dedup)} | "
-                       f"migrate {len(repaired)} | stale {len(stale)} | "
-                       f"manual {len(manual)} | transient {len(transient)}",
+                       f"migrate {len(repaired)} | archive-dead {len(dead)} | "
+                       f"stale {len(stale)} | manual {len(manual)} | "
+                       f"transient {len(transient)}",
               "detail": ""}]
     synced = [a for a in actions if a["mod"]["steam"] or a["mod"]["modio"]]
     if synced:
@@ -1842,6 +1844,10 @@ def main(argv=None):
     ap.add_argument("--repair-legacy", action="store_true",
                     help="translate supported data-only TimberAPI Specifications into native "
                          "Blueprints for the installed game; compiled mods remain report-only")
+    ap.add_argument("--archive-dead", action="store_true",
+                    help="also archive UNFIXABLE legacy packages (no migration path, "
+                         "abandoned upstream) to __archives; explicit opt-in, never "
+                         "part of --fix")
     args = ap.parse_args(argv)
     if args.fix:
         args.apply = args.repair_legacy = args.force = True
@@ -1907,6 +1913,21 @@ def main(argv=None):
                     "reason": profile["reason"],
                     "warn": None,
                     "profile": profile,
+                })
+        if args.archive_dead:
+            planned = {a["mod"]["folder"] for a in actions}
+            archive = dated_archive_dir()
+            for profile in unfixable:
+                mod = profile["mod"]
+                if mod["folder"] in planned:
+                    continue
+                actions.append({
+                    "kind": "archive_dead",
+                    "mod": mod,
+                    "dest_parent": archive,
+                    "reason": "unloadable AND unfixable (" + profile["reason"] +
+                              "); archiving on explicit --archive-dead request",
+                    "warn": None,
                 })
 
         if not args.no_crash:
