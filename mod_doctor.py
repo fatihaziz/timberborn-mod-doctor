@@ -1107,14 +1107,15 @@ def action_items(actions, applied):
 def summary_items(diagnoses, actions, applied):
     disable = [a for a in actions if a["kind"] == "disable"]
     dedup = [a for a in actions if a["kind"] == "dedup"]
+    legacy = [a for a in actions if a["kind"] == "legacy"]
     stale = [d for d in diagnoses if d.get("stale")]
     transient = [d for d in diagnoses if d["cls"] == "transient"]
     acted = {a["mod"]["folder"] for a in actions}
     manual = [d for d in diagnoses if d.get("culprits")
               and not any(c["folder"] in acted for c in d["culprits"])]
     items = [{"sev": "info",
-              "label": f"disable {len(disable)} | dedup {len(dedup)} | stale {len(stale)} "
-                       f"| manual {len(manual)} | transient {len(transient)}",
+              "label": f"disable {len(disable)} | dedup {len(dedup)} | legacy {len(legacy)} "
+                       f"| stale {len(stale)} | manual {len(manual)} | transient {len(transient)}",
               "detail": ""}]
     synced = [a for a in actions if a["mod"]["steam"] or a["mod"]["modio"]]
     if synced:
@@ -1261,6 +1262,22 @@ def render_tui(meta, sections):
 
 # --------------------------------------------------------------------------- #
 # Main
+def legacy_mods(mods):
+    """Folders the game can never load on the current version: TimberAPI mod.json mods
+    (no native manifest.json). TimberAPI is a no-op shim on Timberborn 1.x, so these stay
+    unloaded -- harmless (the game just logs 'No manifest file found'), never crashing.
+    Surfaced so --drop-legacy can archive them; they CANNOT be made to load without an
+    author rebuild to the native manifest.json format for the current game."""
+    out = []
+    for m in mods:
+        f = m["folder"]
+        if m["is_loaded"] or _looks_external(f):
+            continue
+        if (f / "mod.json").exists() and not (f / "manifest.json").exists():
+            out.append(m)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Timberborn mod crash triage + dedup")
@@ -1278,6 +1295,9 @@ def main(argv=None):
     ap.add_argument("--mods", help="Timberborn Mods dir (default: auto-detect / $TIMBERBORN_MODS)")
     ap.add_argument("--game",
                     help="Timberborn install or its Managed dir (default: auto-detect / $TIMBERBORN_GAME)")
+    ap.add_argument("--drop-legacy", action="store_true",
+                    help="archive TimberAPI mod.json mods that cannot load on this game "
+                         "(they run only under TimberAPI, a no-op shim on Timberborn 1.x)")
     args = ap.parse_args(argv)
     if args.mods or args.game:
         global MODS, ER, GAME, GAMEV
@@ -1318,6 +1338,16 @@ def main(argv=None):
     diagnoses, actions = build_plan(mods, reports, args.force)
     if args.no_dedup:
         actions = [a for a in actions if a["kind"] != "dedup"]
+    if args.drop_legacy:
+        planned = {a["mod"]["folder"] for a in actions}
+        arch = dated_archive_dir()
+        for m in legacy_mods(mods):
+            if m["folder"] in planned:
+                continue
+            actions.append({"kind": "legacy", "mod": m, "dest_parent": arch,
+                            "reason": "TimberAPI mod.json mod -- cannot load on this game "
+                                      "(TimberAPI is a no-op shim on 1.x); archiving",
+                            "warn": None})
 
     if not args.no_crash:
         sections.append(("CRASH TRIAGE", diag_items(diagnoses, player_note)))
