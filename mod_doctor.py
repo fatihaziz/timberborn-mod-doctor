@@ -119,6 +119,38 @@ FOUNDATIONAL = {"Harmony", "TimberApi", "TimberUi", "eMka.ModSettings"}  # infor
 # --------------------------------------------------------------------------- #
 # Mod model
 # --------------------------------------------------------------------------- #
+def _strip_json_comments(text: str) -> str:
+    """Remove // and /* */ comments without touching markers inside JSON strings."""
+    out = []
+    i, in_string, escaped = 0, False, False
+    while i < len(text):
+        char = text[i]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            i += 1
+        elif text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            i = len(text) if end < 0 else end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
 def read_json(p: Path):
     # Timberborn's manifest parser is lenient; Python's json is strict. Match the
     # game so hand-authored manifests stay visible -- else they read as "not loaded"
@@ -126,12 +158,17 @@ def read_json(p: Path):
     # whose multi-line Description (raw newlines in a string) broke strict parsing, so
     # its duplicate went undetected and the dup_id crash had no dedup action.
     #   strict=False -> allow raw newlines / control chars inside string values;
-    #   comma strip  -> tolerate a trailing comma before } or ].
+    #   comment strip -> tolerate mod.json JSONC comments;
+    #   comma strip   -> tolerate a trailing comma before } or ].
     try:
         text = p.read_text(encoding="utf-8-sig", errors="replace")
     except Exception:
         return None
-    for candidate in (text, re.sub(r",(\s*[}\]])", r"\1", text)):
+    uncommented = _strip_json_comments(text)
+    candidates = (text, uncommented,
+                  re.sub(r",(\s*[}\]])", r"\1", text),
+                  re.sub(r",(\s*[}\]])", r"\1", uncommented))
+    for candidate in candidates:
         try:
             return json.loads(candidate, strict=False)
         except json.JSONDecodeError:
@@ -295,14 +332,16 @@ def normalize_version_dirs(apply: bool) -> list[dict]:
         man = read_json(folder / "manifest.json")
         if not isinstance(man, dict):
             if (folder / "mod.json").exists():
-                detail = ("TimberAPI mod (uses mod.json, not the native manifest.json) -> the "
-                          "game's own loader skips it ('No manifest file found' in Player.log); "
-                          "it runs ONLY under the TimberAPI framework. Not a native mod -> not "
-                          "wrapping")
+                detail = ("legacy TimberAPI package -> a version directory alone cannot port "
+                          "its schema or compiled code. See LEGACY COMPATIBILITY; "
+                          "--repair-legacy migrates supported data-only Specifications to "
+                          "native 1.x Blueprints.")
+                items.append({"sev": "warn", "label": f"migration needed {name}",
+                              "detail": detail})
             else:
                 detail = ("no manifest.json or mod.json at root -> not a loadable mod (a stray "
                           "folder, or a mod nested one level too deep); not wrapping")
-            items.append({"sev": "skip", "label": f"skip {name}", "detail": detail})
+                items.append({"sev": "skip", "label": f"skip {name}", "detail": detail})
             continue
         mgv = man.get("MinimumGameVersion")
         if not (mgv and vtuple(mgv)):
@@ -1056,12 +1095,15 @@ def unique_dest(parent: Path, name: str) -> Path:
 
 def apply_actions(actions):
     done = []
-    for a in actions:
-        src = a["mod"]["folder"]
-        a["dest_parent"].mkdir(parents=True, exist_ok=True)
-        dest = unique_dest(a["dest_parent"], src.name)
-        shutil.move(str(src), str(dest))
-        done.append((a, dest))
+    for action in actions:
+        if action["kind"] == "repair_legacy":
+            destination = _apply_legacy_repair(action)
+        else:
+            source = action["mod"]["folder"]
+            action["dest_parent"].mkdir(parents=True, exist_ok=True)
+            destination = unique_dest(action["dest_parent"], source.name)
+            shutil.move(str(source), str(destination))
+        done.append((action, destination))
     return done
 
 
@@ -1093,12 +1135,20 @@ def diag_items(diagnoses, player_log_note=False):
 
 def action_items(actions, applied):
     items = []
-    for a in actions:
-        m = a["mod"]
-        tag = "-> _BUG" if a["kind"] == "disable" else "-> __archives"
-        items.append({"sev": "action",
-                      "label": f"{'moved' if applied else 'will move'} {m['name']} {tag}",
-                      "detail": f"why: {a['reason']}\n{source_note(m)}"})
+    for action in actions:
+        mod = action["mod"]
+        if action["kind"] == "repair_legacy":
+            verb = "migrated" if applied else "will migrate"
+            target = action.get("repair_path", mod["folder"].with_name(
+                mod["folder"].name + "__mod_doctor_1.0"))
+            label = f"{verb} {mod['name']} -> native {target.name}"
+            detail = (f"why: {action['reason']}\noriginal -> __archives\n"
+                      f"generated target: {target}\n{source_note(mod)}")
+        else:
+            tag = "-> _BUG" if action["kind"] == "disable" else "-> __archives"
+            label = f"{'moved' if applied else 'will move'} {mod['name']} {tag}"
+            detail = f"why: {action['reason']}\n{source_note(mod)}"
+        items.append({"sev": "action", "label": label, "detail": detail})
     if not actions:
         items.append({"sev": "ok", "label": "nothing to do", "detail": ""})
     return items
@@ -1107,15 +1157,16 @@ def action_items(actions, applied):
 def summary_items(diagnoses, actions, applied):
     disable = [a for a in actions if a["kind"] == "disable"]
     dedup = [a for a in actions if a["kind"] == "dedup"]
-    legacy = [a for a in actions if a["kind"] == "legacy"]
+    repaired = [a for a in actions if a["kind"] == "repair_legacy"]
     stale = [d for d in diagnoses if d.get("stale")]
     transient = [d for d in diagnoses if d["cls"] == "transient"]
     acted = {a["mod"]["folder"] for a in actions}
     manual = [d for d in diagnoses if d.get("culprits")
               and not any(c["folder"] in acted for c in d["culprits"])]
     items = [{"sev": "info",
-              "label": f"disable {len(disable)} | dedup {len(dedup)} | legacy {len(legacy)} "
-                       f"| stale {len(stale)} | manual {len(manual)} | transient {len(transient)}",
+              "label": f"disable {len(disable)} | dedup {len(dedup)} | "
+                       f"migrate {len(repaired)} | stale {len(stale)} | "
+                       f"manual {len(manual)} | transient {len(transient)}",
               "detail": ""}]
     synced = [a for a in actions if a["mod"]["steam"] or a["mod"]["modio"]]
     if synced:
@@ -1263,25 +1314,344 @@ def render_tui(meta, sections):
 # --------------------------------------------------------------------------- #
 # Main
 def legacy_mods(mods):
-    """Folders the game can never load on the current version: TimberAPI mod.json mods
-    (no native manifest.json). TimberAPI is a no-op shim on Timberborn 1.x, so these stay
-    unloaded -- harmless (the game just logs 'No manifest file found'), never crashing.
-    Surfaced so --drop-legacy can archive them; they CANNOT be made to load without an
-    author rebuild to the native manifest.json format for the current game."""
+    """TimberAPI mod.json folders skipped by Timberborn's native loader."""
     out = []
     for m in mods:
-        f = m["folder"]
-        if m["is_loaded"] or _looks_external(f):
+        folder = m["folder"]
+        if m["is_loaded"] or _looks_external(folder):
             continue
-        if (f / "mod.json").exists() and not (f / "manifest.json").exists():
+        if (folder / "mod.json").exists() and not (folder / "manifest.json").exists():
             out.append(m)
     return out
 
 
+def _legacy_specs_dir(folder: Path) -> Path | None:
+    try:
+        return next((p for p in folder.iterdir()
+                     if p.is_dir() and p.name.lower() == "specifications"), None)
+    except OSError:
+        return None
+
+
+def _legacy_profile(mod):
+    """Classify a TimberAPI package by what can be migrated without inventing code.
+
+    Data-only Specification packages map deterministically to Timberborn 1.x
+    Blueprints. Compiled TimberAPI DLLs and bundles containing serialized GameObjects
+    need source-level rebuilds; renaming their manifest would only expose incompatible
+    binaries to the current loader.
+    """
+    folder = mod["folder"]
+    metadata = read_json(folder / "mod.json")
+    if not isinstance(metadata, dict):
+        return {"mod": mod, "repairable": False, "reason": "unreadable mod.json"}
+    entry_dll = metadata.get("EntryDll")
+    if entry_dll:
+        dll = folder / str(entry_dll)
+        refs = sorted(_assembly_refs(dll)) if dll.exists() else []
+        obsolete = [ref for ref in refs if ref == "TimberApi" or
+                    (ref.startswith("Timberborn.") and not (GAME / f"{ref}.dll").exists())]
+        evidence = ", ".join(obsolete[:8]) or str(entry_dll)
+        return {
+            "mod": mod, "metadata": metadata, "repairable": False,
+            "reason": f"compiled EntryDll requires a source rebuild; obsolete references: {evidence}",
+        }
+    specs_dir = _legacy_specs_dir(folder)
+    if not specs_dir:
+        return {
+            "mod": mod, "metadata": metadata, "repairable": False,
+            "reason": "no Specifications directory to translate",
+        }
+    supported = ("NeedSpecification.", "GoodSpecification.", "RecipeSpecification.",
+                 "FactionSpecification.", "BuildingSpecification.")
+    specs = sorted(p for p in specs_dir.glob("*.json") if p.is_file())
+    unsupported = [p.name for p in specs if not p.name.startswith(supported)]
+    if not specs or unsupported:
+        detail = "no supported specification files" if not specs else (
+            "unsupported specification types: " + ", ".join(unsupported))
+        return {"mod": mod, "metadata": metadata, "repairable": False, "reason": detail}
+    assets = next((p for p in folder.iterdir()
+                   if p.is_dir() and p.name.lower() == "assets"), None)
+    if assets:
+        for manifest in assets.glob("*.manifest"):
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^- Class: (?:1|114)$", text):
+                return {
+                    "mod": mod, "metadata": metadata, "repairable": False,
+                    "reason": "asset bundle contains serialized GameObjects/scripts and needs "
+                              "a current Unity/source rebuild",
+                }
+    obsolete_targets = []
+    for spec in specs:
+        if spec.name.startswith("BuildingSpecification."):
+            tail = spec.name[len("BuildingSpecification."):].removesuffix(".json")
+            filename = f"{tail}.blueprint.json"
+            if not _built_in_blueprint_path(filename):
+                obsolete_targets.append(filename)
+    reason = "data-only TimberAPI Specifications can be translated to native Blueprints"
+    if obsolete_targets:
+        reason += "; obsolete building targets omitted: " + ", ".join(obsolete_targets)
+    return {
+        "mod": mod, "metadata": metadata, "specs_dir": specs_dir, "specs": specs,
+        "assets_dir": assets, "repairable": True, "obsolete_targets": obsolete_targets,
+        "reason": reason,
+    }
+
+
+def _coordinate_legacy_profiles(profiles):
+    """Assign duplicate legacy definitions to one package and deduplicate appends."""
+    definitions = defaultdict(list)
+    for profile in profiles:
+        profile["omit_specs"] = set()
+        profile["omit_needs"] = set()
+        profile["omit_goods"] = set()
+        profile["omit_recipes"] = set()
+        if not profile["repairable"]:
+            continue
+        for source in profile["specs"]:
+            kind = next((prefix for prefix in ("Need", "Good", "Recipe")
+                         if source.name.startswith(prefix + "Specification.")), None)
+            if not kind:
+                continue
+            spec = read_json(source)
+            identity = spec.get("Id") if isinstance(spec, dict) else None
+            if identity:
+                definitions[(kind, str(identity))].append((profile, source))
+    for (kind, identity), owners in definitions.items():
+        if len(owners) < 2:
+            continue
+        def ownership(entry):
+            metadata = entry[0]["metadata"]
+            name = f"{metadata.get('Name', '')} {metadata.get('UniqueId', '')}".lower()
+            return (identity.lower() in name, -len(name))
+        winner, _ = max(owners, key=ownership)
+        for profile, source in owners:
+            if profile is winner:
+                continue
+            profile["omit_specs"].add(source.name)
+            profile[f"omit_{kind.lower()}s"].add(identity)
+            profile["reason"] += f"; duplicate {kind} {identity} supplied by " \
+                                 f"{winner['mod']['name']}"
+    return profiles
+
+
+def _hex_color(value):
+    if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6,8}", value):
+        return value
+    raw = value[1:]
+    channels = [int(raw[i:i + 2], 16) / 255 for i in range(0, len(raw), 2)]
+    if len(channels) == 3:
+        channels.append(1.0)
+    return dict(zip(("r", "g", "b", "a"), channels))
+
+
+def _native_asset_path(value, metadata):
+    if not isinstance(value, str):
+        return value
+    for asset in metadata.get("Assets", []) or []:
+        prefix = asset.get("Prefix") if isinstance(asset, dict) else None
+        if prefix and value.startswith(prefix + "/"):
+            return value[len(prefix) + 1:]
+    return value
+
+
+def _write_json(path: Path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+
+
+def _convert_need(spec):
+    value = dict(spec)
+    for key in ("CriticalNeedType", "CriticalSpriteName", "CriticalDescriptionLocKey",
+                "DeathOnMinValue", "DeathMessageLocKey", "RequiredFeatureToggle"):
+        value.pop(key, None)
+    value.setdefault("HoursWarningThreshold", 0.0)
+    value.setdefault("UnfavorableWellbeing", 0)
+    return {"NeedSpec": value}
+
+
+def _convert_good(spec, metadata):
+    value = dict(spec)
+    visible = value.get("VisibleContainer")
+    if isinstance(visible, dict):
+        value["VisibleContainer"] = visible.get("Value", "")
+    value["ContainerColor"] = _hex_color(value.get("ContainerColor"))
+    value["Icon"] = _native_asset_path(value.get("Icon", ""), metadata)
+    value.pop("RequiredFeatureToggle", None)
+    value.setdefault("ContainerMaterial", "")
+    value.setdefault("ForceImport", True)
+    return {"GoodSpec": value}
+
+
+def _convert_recipe(spec, metadata):
+    value = dict(spec)
+    value.setdefault("BackwardCompatibleIds", [])
+    for key in ("Ingredients", "Products"):
+        converted = []
+        for item in value.get(key, []) or []:
+            item = dict(item)
+            good = item.pop("Good", None)
+            if isinstance(good, dict):
+                item["Id"] = good.get("Id")
+            converted.append(item)
+        value[key] = converted
+    fuel = value.get("Fuel")
+    if isinstance(fuel, dict):
+        value["Fuel"] = fuel.get("Id", "")
+    value["Icon"] = _native_asset_path(value.get("Icon", ""), metadata)
+    return {"RecipeSpec": value}
+
+
+def _built_in_blueprint_path(filename: str) -> Path | None:
+    archive = GAME.parent / "StreamingAssets" / "Modding" / "Blueprints.zip"
+    if not archive.exists():
+        return None
+    with zipfile.ZipFile(archive) as blueprints:
+        matches = [Path(name) for name in blueprints.namelist()
+                   if Path(name).name == filename]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _convert_legacy_package(profile, destination: Path):
+    """Write a native, current-build package from one validated data-only profile."""
+    metadata = profile["metadata"]
+    current = ".".join(map(str, GAMEV))
+    version_root = destination / f"version-{current}"
+    version_root.mkdir(parents=True)
+    manifest = {
+        "Name": metadata.get("Name") or profile["mod"]["name"],
+        "Version": metadata.get("Version") or "1.0.0",
+        "Id": metadata.get("UniqueId") or metadata.get("Id") or profile["mod"]["name"],
+        "MinimumGameVersion": current,
+        "Description": "Locally migrated from a data-only TimberAPI package by mod_doctor.",
+    }
+    _write_json(version_root / "manifest.json", manifest)
+    for source in profile["specs"]:
+        if source.name in profile.get("omit_specs", set()):
+            continue
+        spec = read_json(source)
+        if not isinstance(spec, dict):
+            raise ValueError(f"unreadable specification: {source.name}")
+        name = source.name
+        if name.startswith("NeedSpecification."):
+            tail = name[len("NeedSpecification."):]
+            tail = tail.removesuffix(".original.json").removesuffix(".json")
+            _write_json(version_root / "Needs" / f"Need.{tail}.blueprint.json",
+                        _convert_need(spec))
+        elif name.startswith("GoodSpecification."):
+            tail = name[len("GoodSpecification."):]
+            tail = tail.removesuffix(".original.json").removesuffix(".json")
+            _write_json(version_root / "Goods" / f"Good.{tail}.blueprint.json",
+                        _convert_good(spec, metadata))
+        elif name.startswith("RecipeSpecification."):
+            tail = name[len("RecipeSpecification."):]
+            tail = tail.removesuffix(".original.json").removesuffix(".json")
+            _write_json(version_root / "Recipes" / f"Recipe.{tail}.blueprint.json",
+                        _convert_recipe(spec, metadata))
+        elif name.startswith("FactionSpecification."):
+            faction = name[len("FactionSpecification."):].removesuffix(".json")
+            needs = [item for item in spec.get("Needs", [])
+                     if item not in profile.get("omit_needs", set())]
+            if needs:
+                _write_json(
+                    version_root / "NeedCollection" /
+                    f"NeedCollection.{faction}.blueprint.json",
+                    {"NeedCollectionSpec": {"CollectionId": faction,
+                                            "Needs#append": needs}})
+            goods = [item for item in spec.get("Goods", [])
+                     if item not in profile.get("omit_goods", set())]
+            if goods:
+                _write_json(
+                    version_root / "GoodCollections" /
+                    f"GoodCollection.{faction}.blueprint.json",
+                    {"GoodCollectionSpec": {"CollectionId": faction,
+                                            "Goods#append": goods}})
+        elif name.startswith("BuildingSpecification."):
+            tail = name[len("BuildingSpecification."):].removesuffix(".json")
+            target_name = f"{tail}.blueprint.json"
+            target = _built_in_blueprint_path(target_name)
+            if not target:
+                continue  # Building/faction no longer exists in the installed game.
+            recipes = [item for item in
+                       (spec.get("RecipeIds") or spec.get("ProductionRecipeIds") or [])
+                       if item not in profile.get("omit_recipes", set())]
+            if recipes:
+                _write_json(
+                    version_root / target,
+                    {"ManufactorySpec": {"ProductionRecipeIds#append": recipes}})
+    lang_dir = next((p for p in profile["mod"]["folder"].iterdir()
+                     if p.is_dir() and p.name.lower() == "lang"), None)
+    if lang_dir:
+        for source in lang_dir.glob("*.txt"):
+            target = version_root / "Localizations" / f"{source.stem}.csv"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    assets = profile.get("assets_dir")
+    if assets:
+        target = version_root / "AssetBundles"
+        target.mkdir(parents=True, exist_ok=True)
+        for source in assets.iterdir():
+            if source.is_file():
+                shutil.copy2(source, target / source.name)
+    for pattern in ("thumbnail.*", "icon.*"):
+        for source in profile["mod"]["folder"].glob(pattern):
+            if source.is_file():
+                shutil.copy2(source, version_root / source.name)
+    return version_root
+
+
+def _apply_legacy_repair(action):
+    source = action["mod"]["folder"]
+    action["dest_parent"].mkdir(parents=True, exist_ok=True)
+    archived = unique_dest(action["dest_parent"], source.name)
+    repaired = unique_dest(source.parent, source.name + "__mod_doctor_1.0")
+    staging = unique_dest(source.parent, "." + source.name + ".mod-doctor-staging")
+    profile = action.get("profile") or _legacy_profile(action["mod"])
+    try:
+        if not profile["repairable"]:
+            raise ValueError(profile["reason"])
+        _convert_legacy_package(profile, staging)
+        shutil.move(str(source), str(archived))
+        shutil.move(str(staging), str(repaired))
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if archived.exists() and not source.exists():
+            shutil.move(str(archived), str(source))
+        raise
+    action["repair_path"] = repaired
+    return repaired
+
+
+def legacy_compat_items(profiles):
+    items = []
+    for profile in profiles:
+        mod = profile["mod"]
+        if profile["repairable"]:
+            items.append({
+                "sev": "action",
+                "label": f"native migration available for {mod['name']}",
+                "detail": profile["reason"] + "\n--repair-legacy translates Specifications "
+                          "to 1.x Blueprints and preserves the original in __archives.",
+            })
+        else:
+            items.append({
+                "sev": "warn",
+                "label": f"source rebuild required for {mod['name']}",
+                "detail": profile["reason"] + "\nA synthetic manifest is rejected because "
+                          "it would load incompatible code/assets rather than port them.",
+            })
+    if not items:
+        items.append({"sev": "ok", "label": "no legacy TimberAPI packages", "detail": ""})
+    return items
+
+
 # --------------------------------------------------------------------------- #
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Timberborn mod crash triage + dedup")
-    ap.add_argument("--apply", action="store_true", help="perform the moves (default: dry run)")
+    ap = argparse.ArgumentParser(description="Timberborn mod crash triage + compatibility repair")
+    ap.add_argument("--apply", action="store_true",
+                    help="perform planned moves/migrations (default: dry run)")
     ap.add_argument("--reports", type=int, default=0,
                     help="only the N most recent error reports (0 = all)")
     ap.add_argument("--no-dedup", action="store_true", help="skip duplicate cleanup")
@@ -1295,9 +1665,9 @@ def main(argv=None):
     ap.add_argument("--mods", help="Timberborn Mods dir (default: auto-detect / $TIMBERBORN_MODS)")
     ap.add_argument("--game",
                     help="Timberborn install or its Managed dir (default: auto-detect / $TIMBERBORN_GAME)")
-    ap.add_argument("--drop-legacy", action="store_true",
-                    help="archive TimberAPI mod.json mods that cannot load on this game "
-                         "(they run only under TimberAPI, a no-op shim on Timberborn 1.x)")
+    ap.add_argument("--repair-legacy", action="store_true",
+                    help="translate supported data-only TimberAPI Specifications into native "
+                         "Blueprints for the installed game; compiled mods remain report-only")
     args = ap.parse_args(argv)
     if args.mods or args.game:
         global MODS, ER, GAME, GAMEV
@@ -1322,6 +1692,9 @@ def main(argv=None):
     meta.append(f"Mod folders  : {len(mods)} present, {loaded} loaded by the game")
 
     sections.append(("GAME COMPATIBILITY (AssemblyRef scan)", compat_report(mods)))
+    legacy_profiles = _coordinate_legacy_profiles(
+        [_legacy_profile(mod) for mod in legacy_mods(mods)])
+    sections.append(("LEGACY COMPATIBILITY", legacy_compat_items(legacy_profiles)))
 
     reports, player_note = [], False
     if not args.no_crash:
@@ -1338,16 +1711,21 @@ def main(argv=None):
     diagnoses, actions = build_plan(mods, reports, args.force)
     if args.no_dedup:
         actions = [a for a in actions if a["kind"] != "dedup"]
-    if args.drop_legacy:
+    if args.repair_legacy:
         planned = {a["mod"]["folder"] for a in actions}
-        arch = dated_archive_dir()
-        for m in legacy_mods(mods):
-            if m["folder"] in planned:
+        archive = dated_archive_dir()
+        for profile in legacy_profiles:
+            mod = profile["mod"]
+            if not profile["repairable"] or mod["folder"] in planned:
                 continue
-            actions.append({"kind": "legacy", "mod": m, "dest_parent": arch,
-                            "reason": "TimberAPI mod.json mod -- cannot load on this game "
-                                      "(TimberAPI is a no-op shim on 1.x); archiving",
-                            "warn": None})
+            actions.append({
+                "kind": "repair_legacy",
+                "mod": mod,
+                "dest_parent": archive,
+                "reason": profile["reason"],
+                "warn": None,
+                "profile": profile,
+            })
 
     if not args.no_crash:
         sections.append(("CRASH TRIAGE", diag_items(diagnoses, player_note)))

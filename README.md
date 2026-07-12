@@ -70,8 +70,8 @@ Then drop `mod_doctor.py` anywhere and run it. No build step, no config file.
 ```bash
 python mod_doctor.py                 # dry run: diagnose + show the plan (TUI if interactive)
 python mod_doctor.py --apply         # perform the fixes: disable -> _BUG, dedup -> __archives
-python mod_doctor.py --drop-legacy   # dry run: list unloadable TimberAPI mod.json mods
-python mod_doctor.py --apply --drop-legacy   # archive those legacy mods (does not port them)
+python mod_doctor.py --repair-legacy   # dry run: plan safe TimberAPI -> native migrations
+python mod_doctor.py --apply --repair-legacy   # migrate supported data-only mods
 python mod_doctor.py --plain         # colored, non-interactive summary (titles only)
 python mod_doctor.py --plain --details   # ...with every finding's detail expanded
 python mod_doctor.py --tui           # force the interactive collapsible TUI
@@ -85,8 +85,8 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 
 | Flag | Effect |
 |---|---|
-| `--apply` | Perform the moves (default is a dry run). |
-| `--drop-legacy` | Include unloadable legacy TimberAPI `mod.json` mods in the archive plan. Requires `--apply` to move them; never converts their binaries to native mods. |
+| `--apply` | Perform the planned moves and migrations (default is a dry run). |
+| `--repair-legacy` | Translate supported data-only TimberAPI `Specifications` into native 1.x `Blueprints`. With `--apply`, archives the original and creates a separate current-version package. Compiled mods remain report-only. |
 | `--plain` / `--tui` | Force plain output / the interactive TUI (default: TUI when the terminal is interactive). |
 | `--details` | In plain mode, print each finding's detail (default: titles only). |
 | `--reports N` | Only the N most recent crash reports (0 = all). |
@@ -94,6 +94,25 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 | `--force` | Also auto-apply low-confidence classes (spec-key, missing-method). |
 | `--mods PATH` | Timberborn Mods dir (overrides auto-detection). |
 | `--game PATH` | Timberborn install or its `Managed` dir (overrides auto-detection). |
+
+### Legacy TimberAPI repair
+
+`--repair-legacy` performs a schema migration, not a manifest rename. It reads the
+installed game's `Blueprints.zip`, targets the exact installed build, translates
+supported needs, goods, recipes, faction collections, and manufactory recipe patches,
+and deduplicates definitions shared by several legacy packages.
+
+| Legacy package | Result |
+|---|---|
+| Data-only `Specifications` | Converted to native `.blueprint.json` files under `version-<installed-game-version>` |
+| Texture-only asset bundle | Preserved under native `AssetBundles/` and its asset paths rewritten |
+| Compiled `EntryDll` using TimberAPI/removed game assemblies | Reported as requiring a source rebuild; never exposed to the native loader |
+| Bundle containing serialized GameObjects/scripts | Reported as requiring a current Unity/source rebuild |
+
+The original package moves to `__archives/YYYYMMDD-N/`. The migrated package uses a
+separate `__mod_doctor_1.0` folder so a Steam/mod.io re-download cannot overwrite it.
+Disable or unsubscribe from the obsolete synced package to stop that old copy from
+returning.
 
 ### Path detection
 
@@ -121,7 +140,7 @@ If your `Documents` folder is redirected, run the tool from inside your Mods fol
 - **Confidence gate** &mdash; auto-applies only high-confidence classes; fragile ones are report-only unless `--force`.
 - **Sync awareness** &mdash; flags Steam/mod.io-synced mods, which re-download on launch unless you also unsubscribe in-game.
 - **Correct load model** &mdash; mirrors the game's own loader: a mod loads from the highest `version-*` folder whose version is `<=` your game, from a real `manifest.json`; dormant/`mod.json`-only/external (BepInEx) folders are recognized and left alone.
-- **Legacy TimberAPI guard** &mdash; `--drop-legacy` archives `mod.json`-only mods under `__archives/YYYYMMDD-N/`; it does not generate a misleading native manifest or attempt to port binaries compiled for obsolete APIs.
+- **Legacy migration gate** &mdash; migrates only data whose 1.x representation is deterministic; compiled DLLs and serialized GameObjects remain report-only because a synthetic manifest would load obsolete code, not port it.
 
 ## How it works (internals)
 
