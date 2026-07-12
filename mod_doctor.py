@@ -5,8 +5,9 @@ Implements the diagnostic playbook in README.md (same folder). It:
   1. reads the Error-report zips (Version / Exception / Player log),
   2. classifies each crash into a known class,
   3. resolves the culprit mod against the ACTIVE mod folders,
-  4. plans a safe action -- disable an error mod (-> _BUG/) or remove the
-     older copy of a duplicate mod Id (-> __archives/YYYYMMDD-N/).
+  4. plans a safe action -- disable an error mod (-> _BUG/), remove the older
+     copy of a duplicate mod Id (-> __archives/), or park dead legacy
+     packages (-> __dead/).
 
 Default is a DRY RUN: it prints the diagnosis and the exact moves it would
 make, and changes nothing. Pass --apply to perform the moves.
@@ -110,7 +111,7 @@ def resolve_paths(mods=None, game=None):
 
 
 MODS, ER, GAME = resolve_paths()
-EXCLUDE = {"_BUG", "__archives", "tmp", ".ilspy-cache"}  # not mods: disabled, archived, scratch, cache
+EXCLUDE = {"_BUG", "__archives", "__dead", "tmp", ".ilspy-cache"}  # not mods: disabled, archived, dead, scratch, cache
 VERSION_DIR_RE = re.compile(r"(?i)^version-\d+\.\d+(?:\.\d+)*$")
 # Steam-overlay panel-stack error is a game/Steam bug, not a mod fault.
 TRANSIENT_MARKERS = ("SteamOverlayInputBlocker", "is not on top of the stack")
@@ -945,16 +946,22 @@ def resolve_culprit(diag: dict, mods, known: set[str]) -> dict:
 
 
 def disposed_roots() -> list:
-    """Top-level mod folders already disposed to _BUG/ or __archives/YYYYMMDD-N/."""
+    """Top-level mod folders already disposed to _BUG/, __archives/, or __dead/."""
     out = []
     bug = MODS / "_BUG"
     if bug.exists():
         out += [p for p in bug.iterdir() if p.is_dir() and p.name != "_edits-backup"]
-    arch = MODS / "__archives"
-    if arch.exists():
-        for batch in arch.iterdir():
-            if batch.is_dir():
-                out += [p for p in batch.iterdir() if p.is_dir()]
+    for parent in (MODS / "__archives", MODS / "__dead"):
+        if not parent.exists():
+            continue
+        for entry in parent.iterdir():
+            if not entry.is_dir():
+                continue
+            # Flat layout (current) plus legacy dated batches (YYYYMMDD-N).
+            if re.fullmatch(r"\d{8}-\d+", entry.name):
+                out += [p for p in entry.iterdir() if p.is_dir()]
+            else:
+                out.append(entry)
     return out
 
 
@@ -1014,12 +1021,14 @@ def pick_keeper(group):
 # --------------------------------------------------------------------------- #
 # Planning
 # --------------------------------------------------------------------------- #
-def dated_archive_dir():
-    today = time.strftime("%Y%m%d")
-    n = 1
-    while (MODS / "__archives" / f"{today}-{n}").exists():
-        n += 1
-    return MODS / "__archives" / f"{today}-{n}"
+def archive_dir():
+    """Flat archive folder -- no dated batches; unique_dest() resolves collisions."""
+    return MODS / "__archives"
+
+
+def dead_dir():
+    """Flat parking folder for unfixable legacy packages."""
+    return MODS / "__dead"
 
 
 def build_plan(mods, reports, force: bool):
@@ -1085,7 +1094,7 @@ def build_plan(mods, reports, force: bool):
                 continue
             planned_folders.add(m["folder"])
             if archive_parent is None:
-                archive_parent = dated_archive_dir()
+                archive_parent = archive_dir()
             actions.append({
                 "kind": "dedup", "mod": m, "dest_parent": archive_parent,
                 "reason": (f"duplicate Id '{mod_id}': keep {keeper['name']} "
@@ -1160,7 +1169,8 @@ def action_items(actions, applied):
             detail = (f"why: {action['reason']}\noriginal -> __archives\n"
                       f"generated target: {target}\n{source_note(mod)}")
         else:
-            tag = "-> _BUG" if action["kind"] == "disable" else "-> __archives"
+            tag = {"disable": "-> _BUG",
+                   "archive_dead": "-> __dead"}.get(action["kind"], "-> __archives")
             label = f"{'moved' if applied else 'will move'} {mod['name']} {tag}"
             detail = f"why: {action['reason']}\n{source_note(mod)}"
         items.append({"sev": "action", "label": label, "detail": detail})
@@ -1316,7 +1326,7 @@ def _build_tui_app(meta, sections, pending=0, dead=0):
                              id="fix", variant="error", classes="fixbar")
             elif dead:
                 yield Button(f"ARCHIVE {dead} DEAD PACKAGE(S)  --  unfixable, "
-                             "unloadable; moves them to __archives (recoverable)",
+                             "unloadable; moves them to __dead (recoverable)",
                              id="fix", variant="warning", classes="fixbar")
             else:
                 yield Static("  all clean -- nothing to fix, nothing dead",
@@ -1853,8 +1863,8 @@ def main(argv=None):
                     help="translate supported data-only TimberAPI Specifications into native "
                          "Blueprints for the installed game; compiled mods remain report-only")
     ap.add_argument("--archive-dead", action="store_true",
-                    help="also archive UNFIXABLE legacy packages (no migration path, "
-                         "abandoned upstream) to __archives; explicit opt-in, never "
+                    help="also park UNFIXABLE legacy packages (no migration path, "
+                         "abandoned upstream) in __dead; explicit opt-in, never "
                          "part of --fix")
     args = ap.parse_args(argv)
     if args.fix:
@@ -1909,7 +1919,7 @@ def main(argv=None):
         repairable = [p for p in legacy_profiles if p["repairable"]]
         if args.repair_legacy:
             planned = {a["mod"]["folder"] for a in actions}
-            archive = dated_archive_dir()
+            archive = archive_dir()
             for profile in repairable:
                 mod = profile["mod"]
                 if mod["folder"] in planned:
@@ -1924,7 +1934,7 @@ def main(argv=None):
                 })
         if args.archive_dead:
             planned = {a["mod"]["folder"] for a in actions}
-            archive = dated_archive_dir()
+            dead_parent = dead_dir()
             for profile in unfixable:
                 mod = profile["mod"]
                 if mod["folder"] in planned:
@@ -1932,9 +1942,9 @@ def main(argv=None):
                 actions.append({
                     "kind": "archive_dead",
                     "mod": mod,
-                    "dest_parent": archive,
+                    "dest_parent": dead_parent,
                     "reason": "unloadable AND unfixable (" + profile["reason"] +
-                              "); archiving on explicit --archive-dead request",
+                              "); parked in __dead on explicit --archive-dead request",
                     "warn": None,
                 })
 

@@ -27,7 +27,7 @@ After a Timberborn update, one incompatible mod throws the *first uncaught excep
 
 Plus a proactive **AssemblyRef compatibility scan** (reads each mod DLL's real assembly references, ECMA-335) that flags mods needing a game assembly your build lacks *before* the game even crashes.
 
-> **Safe by default.** Running with no arguments is a dry run: it prints the plan and changes nothing. Nothing is ever hard-deleted &mdash; disabled mods move to `_BUG/`, duplicates to `__archives/YYYYMMDD-N/`, both fully recoverable.
+> **Safe by default.** Running with no arguments is a dry run: it prints the plan and changes nothing. Nothing is ever hard-deleted &mdash; disabled mods move to `_BUG/`, duplicates and migration originals to `__archives/`, and (only with `--archive-dead`) unfixable dead packages to `__dead/`. All flat folders, all fully recoverable.
 
 ## Preview
 
@@ -104,6 +104,7 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 | `--apply` | Perform the planned moves and migrations (default is a dry run). |
 | `--fix` / `--force-fix` | One-shot force mode: `--apply --repair-legacy --force` combined. |
 | `--repair-legacy` | Convert supported data-only TimberAPI packages and rebuild bundled compiled adapters against the installed game's DLLs. With `--apply`, archives the original and creates a separate current-version package. Unknown compiled mods remain report-only. |
+| `--archive-dead` | Explicit opt-in: park UNFIXABLE, unloadable legacy packages (abandoned upstream, no migration path) into `__dead/`. Never part of `--fix`. In the TUI this is the **ARCHIVE DEAD PACKAGE(S)** button. |
 | `--plain` / `--tui` | Force plain output / the interactive TUI (default: TUI when the terminal is interactive). |
 | `--details` | In plain mode, print each finding's detail (default: titles only). |
 | `--reports N` | Only the N most recent crash reports (0 = all). |
@@ -137,7 +138,7 @@ For known compiled packages, it builds the bundled adapter source against the in
 | Other compiled `EntryDll` using removed APIs | Reported as requiring a source rebuild; never exposed to the native loader |
 | Bundle containing serialized GameObjects/scripts | Reported as requiring a current Unity/source rebuild |
 
-The original package moves to `__archives/YYYYMMDD-N/`. The migrated package uses a
+The original package moves to `__archives/` (flat &mdash; no dated subfolders). The migrated package uses a
 separate `__mod_doctor_1.0` folder so a Steam/mod.io re-download cannot overwrite it.
 Disable or unsubscribe from the obsolete synced package to stop that old copy from
 returning.

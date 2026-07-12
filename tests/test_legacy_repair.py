@@ -210,8 +210,11 @@ class LegacyRepairTests(unittest.TestCase):
             (migrated / "Needs" / "Need.Beaver.Berries.blueprint.json").exists()
         )
         self.assertFalse(legacy.exists())
-        archived = list(mods_dir.glob("__archives/*/berries-legacy_1_1.0.0"))
-        self.assertEqual(len(archived), 1)
+        self.assertTrue(
+            (mods_dir / "__archives" / "berries-legacy_1_1.0.0").exists()
+        )
+        self.assertFalse(list(mods_dir.glob("__archives/*/berries-legacy_1_1.0.0")),
+                         "archives must be flat -- no dated YYYYMMDD-N subfolders")
 
 
 
