@@ -294,9 +294,15 @@ def normalize_version_dirs(apply: bool) -> list[dict]:
             continue
         man = read_json(folder / "manifest.json")
         if not isinstance(man, dict):
-            items.append({"sev": "skip", "label": f"skip {name}",
-                          "detail": "no readable manifest.json at root (old mod.json format "
-                                    "or non-native) -> the game can't load it; not wrapping"})
+            if (folder / "mod.json").exists():
+                detail = ("TimberAPI mod (uses mod.json, not the native manifest.json) -> the "
+                          "game's own loader skips it ('No manifest file found' in Player.log); "
+                          "it runs ONLY under the TimberAPI framework. Not a native mod -> not "
+                          "wrapping")
+            else:
+                detail = ("no manifest.json or mod.json at root -> not a loadable mod (a stray "
+                          "folder, or a mod nested one level too deep); not wrapping")
+            items.append({"sev": "skip", "label": f"skip {name}", "detail": detail})
             continue
         mgv = man.get("MinimumGameVersion")
         if not (mgv and vtuple(mgv)):
