@@ -21,7 +21,7 @@ Safety guards (see the two "GUARD" comments below):
 Nothing is ever hard-deleted; every move is recoverable and backed up.
 """
 from __future__ import annotations
-import argparse, json, os, re, shutil, struct, subprocess, sys, time, zipfile
+import argparse, csv, json, os, re, shutil, struct, subprocess, sys, time, zipfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -1333,6 +1333,29 @@ def _legacy_specs_dir(folder: Path) -> Path | None:
         return None
 
 
+COMPILED_PORTS = {
+    "kyp.draggable_utils": {
+        "project": "compat/DraggableUtils/DraggableUtils.csproj",
+        "assembly": "DraggableUtils.dll",
+        "tool_group": True,
+        "copy_assets": False,
+    },
+    "tanstaafl.plugins.growthoverlay": {
+        "project": "compat/GrowthOverlay/GrowthOverlay.csproj",
+        "assembly": "GrowthOverlay.dll",
+    },
+}
+
+
+def _compiled_port(metadata):
+    unique_id = str(metadata.get("UniqueId") or "").lower()
+    port = COMPILED_PORTS.get(unique_id)
+    if not port:
+        return None
+    project = Path(__file__).resolve().parent / port["project"]
+    return {**port, "project_path": project}
+
+
 def _legacy_profile(mod):
     """Classify a TimberAPI package by what can be migrated without inventing code.
 
@@ -1347,15 +1370,26 @@ def _legacy_profile(mod):
         return {"mod": mod, "repairable": False, "reason": "unreadable mod.json"}
     entry_dll = metadata.get("EntryDll")
     if entry_dll:
+        port = _compiled_port(metadata)
+        if port and port["project_path"].exists() and shutil.which("dotnet"):
+            return {
+                "mod": mod, "metadata": metadata, "repairable": True,
+                "mode": "compiled", "port": port,
+                "reason": "bundled source adapter rebuilds this legacy feature against "
+                          "the installed game's assemblies",
+            }
         dll = folder / str(entry_dll)
         refs = sorted(_assembly_refs(dll)) if dll.exists() else []
         obsolete = [ref for ref in refs if ref == "TimberApi" or
                     (ref.startswith("Timberborn.") and not (GAME / f"{ref}.dll").exists())]
         evidence = ", ".join(obsolete[:8]) or str(entry_dll)
-        return {
-            "mod": mod, "metadata": metadata, "repairable": False,
-            "reason": f"compiled EntryDll requires a source rebuild; obsolete references: {evidence}",
-        }
+        reason = f"compiled EntryDll requires a source rebuild; obsolete references: {evidence}"
+        if port and not shutil.which("dotnet"):
+            reason += "; install the .NET SDK to use the bundled adapter"
+        elif port:
+            reason += "; bundled adapter project is missing"
+        return {"mod": mod, "metadata": metadata, "repairable": False,
+                "reason": reason}
     specs_dir = _legacy_specs_dir(folder)
     if not specs_dir:
         return {
@@ -1389,12 +1423,14 @@ def _legacy_profile(mod):
             if not _built_in_blueprint_path(filename):
                 obsolete_targets.append(filename)
     reason = "data-only TimberAPI Specifications can be translated to native Blueprints"
+    if assets:
+        reason += "; obsolete Unity asset bundle omitted and built-in icons substituted"
     if obsolete_targets:
         reason += "; obsolete building targets omitted: " + ", ".join(obsolete_targets)
     return {
         "mod": mod, "metadata": metadata, "specs_dir": specs_dir, "specs": specs,
-        "assets_dir": assets, "repairable": True, "obsolete_targets": obsolete_targets,
-        "reason": reason,
+        "assets_dir": assets, "repairable": True, "mode": "data",
+        "obsolete_targets": obsolete_targets, "reason": reason,
     }
 
 
@@ -1406,7 +1442,7 @@ def _coordinate_legacy_profiles(profiles):
         profile["omit_needs"] = set()
         profile["omit_goods"] = set()
         profile["omit_recipes"] = set()
-        if not profile["repairable"]:
+        if not profile["repairable"] or profile.get("mode") != "data":
             continue
         for source in profile["specs"]:
             kind = next((prefix for prefix in ("Need", "Good", "Recipe")
@@ -1445,13 +1481,17 @@ def _hex_color(value):
     return dict(zip(("r", "g", "b", "a"), channels))
 
 
-def _native_asset_path(value, metadata):
+def _native_asset_path(value, metadata, identity=""):
     if not isinstance(value, str):
         return value
+    fallbacks = {
+        "BlueberryPie": "Sprites/Goods/BerriesIcon",
+        "CarrotCake": "Sprites/Goods/CarrotIcon",
+    }
     for asset in metadata.get("Assets", []) or []:
         prefix = asset.get("Prefix") if isinstance(asset, dict) else None
         if prefix and value.startswith(prefix + "/"):
-            return value[len(prefix) + 1:]
+            return fallbacks.get(identity, "Sprites/Goods/BerriesIcon")
     return value
 
 
@@ -1477,7 +1517,8 @@ def _convert_good(spec, metadata):
     if isinstance(visible, dict):
         value["VisibleContainer"] = visible.get("Value", "")
     value["ContainerColor"] = _hex_color(value.get("ContainerColor"))
-    value["Icon"] = _native_asset_path(value.get("Icon", ""), metadata)
+    value["Icon"] = _native_asset_path(
+        value.get("Icon", ""), metadata, str(value.get("Id", "")))
     value.pop("RequiredFeatureToggle", None)
     value.setdefault("ContainerMaterial", "")
     value.setdefault("ForceImport", True)
@@ -1499,7 +1540,8 @@ def _convert_recipe(spec, metadata):
     fuel = value.get("Fuel")
     if isinstance(fuel, dict):
         value["Fuel"] = fuel.get("Id", "")
-    value["Icon"] = _native_asset_path(value.get("Icon", ""), metadata)
+    value["Icon"] = _native_asset_path(
+        value.get("Icon", ""), metadata, str(value.get("Id", "")))
     return {"RecipeSpec": value}
 
 
@@ -1513,20 +1555,111 @@ def _built_in_blueprint_path(filename: str) -> Path | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _convert_legacy_localization(source: Path, target: Path):
+    with source.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
+        rows = list(csv.reader(stream))
+    normalized = []
+    for index, row in enumerate(rows):
+        if not row:
+            continue
+        if index == 0:
+            normalized.append(["ID", "Text", "Comment"])
+        elif len(row) == 1:
+            normalized.append([row[0], "", ""])
+        elif len(row) == 2:
+            normalized.append([row[0], row[1], ""])
+        else:
+            normalized.append([row[0], ",".join(row[1:-1]), row[-1]])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="") as stream:
+        csv.writer(stream, lineterminator="\n").writerows(normalized)
+
+
+def _copy_legacy_support_files(profile, version_root: Path, copy_assets=False):
+    folder = profile["mod"]["folder"]
+    lang_dir = next((p for p in folder.iterdir()
+                     if p.is_dir() and p.name.lower() == "lang"), None)
+    if lang_dir:
+        for source in lang_dir.glob("*.txt"):
+            target = version_root / "Localizations" / f"{source.stem}.csv"
+            _convert_legacy_localization(source, target)
+    assets = next((p for p in folder.iterdir()
+                   if p.is_dir() and p.name.lower() == "assets"), None)
+    if copy_assets and assets:
+        target = version_root / "AssetBundles"
+        target.mkdir(parents=True, exist_ok=True)
+        for source in assets.iterdir():
+            if source.is_file():
+                shutil.copy2(source, target / source.name)
+    for pattern in ("thumbnail.*", "icon.*"):
+        for source in folder.glob(pattern):
+            if source.is_file():
+                shutil.copy2(source, version_root / source.name)
+
+
+def _build_compiled_port(profile, version_root: Path):
+    port = profile["port"]
+    project = port["project_path"]
+    managed_arg = f"-p:ManagedPath={GAME.as_posix()}"
+    environment = {
+        **os.environ,
+        "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
+        "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE": "true",
+        "NUGET_CERT_REVOCATION_MODE": "offline",
+    }
+    commands = []
+    if not (project.parent / "obj" / "project.assets.json").exists():
+        commands.append(["dotnet", "restore", str(project), "--nologo",
+                         "--ignore-failed-sources", managed_arg])
+    commands.append(["dotnet", "build", str(project), "--nologo", "-c", "Release",
+                     "--no-restore", "-clp:ErrorsOnly", managed_arg])
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    env=environment, timeout=120)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("compatibility adapter build timed out") from error
+        if result.returncode:
+            output = (result.stdout + "\n" + result.stderr).strip()
+            raise RuntimeError("compatibility adapter build failed:\n" + output[-4000:])
+    assembly = project.parent / "bin" / "Release" / "netstandard2.1" / port["assembly"]
+    if not assembly.exists():
+        raise RuntimeError(f"compatibility adapter produced no {port['assembly']}")
+    shutil.copy2(assembly, version_root / port["assembly"])
+    _copy_legacy_support_files(
+        profile, version_root, copy_assets=port.get("copy_assets", True))
+    if port.get("tool_group"):
+        _write_json(
+            version_root / "ToolGroups" / "ToolGroups.DraggableUtils.blueprint.json",
+            {"ToolGroupSpec": {
+                "Id": "DraggableUtils",
+                "DisplayNameLocKey": "Kyp.ToolGroups.DraggableUtils",
+                "Icon": "Sprites/BottomBar/DeleteGroupIcon",
+            }})
+
+
 def _convert_legacy_package(profile, destination: Path):
-    """Write a native, current-build package from one validated data-only profile."""
+    """Write a native package targeting the exact installed game build."""
     metadata = profile["metadata"]
     current = ".".join(map(str, GAMEV))
-    version_root = destination / f"version-{current}"
+    branch = ".".join(map(str, GAMEV[:2]))
+    version_root = destination / f"version-{branch}"
     version_root.mkdir(parents=True)
+    compiled = profile.get("mode") == "compiled"
     manifest = {
-        "Name": metadata.get("Name") or profile["mod"]["name"],
-        "Version": metadata.get("Version") or "1.0.0",
+        "Name": (metadata.get("Name") or profile["mod"]["name"]) +
+                (" (mod_doctor 1.0 port)" if compiled else ""),
+        "Version": current if compiled else (metadata.get("Version") or "1.0.0"),
         "Id": metadata.get("UniqueId") or metadata.get("Id") or profile["mod"]["name"],
         "MinimumGameVersion": current,
-        "Description": "Locally migrated from a data-only TimberAPI package by mod_doctor.",
+        "Description": ("Locally rebuilt from a bundled compatibility adapter by mod_doctor."
+                        if compiled else
+                        "Locally migrated from a data-only TimberAPI package by mod_doctor."),
     }
     _write_json(version_root / "manifest.json", manifest)
+    if compiled:
+        _build_compiled_port(profile, version_root)
+        return version_root
     for source in profile["specs"]:
         if source.name in profile.get("omit_specs", set()):
             continue
@@ -1580,24 +1713,7 @@ def _convert_legacy_package(profile, destination: Path):
                 _write_json(
                     version_root / target,
                     {"ManufactorySpec": {"ProductionRecipeIds#append": recipes}})
-    lang_dir = next((p for p in profile["mod"]["folder"].iterdir()
-                     if p.is_dir() and p.name.lower() == "lang"), None)
-    if lang_dir:
-        for source in lang_dir.glob("*.txt"):
-            target = version_root / "Localizations" / f"{source.stem}.csv"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-    assets = profile.get("assets_dir")
-    if assets:
-        target = version_root / "AssetBundles"
-        target.mkdir(parents=True, exist_ok=True)
-        for source in assets.iterdir():
-            if source.is_file():
-                shutil.copy2(source, target / source.name)
-    for pattern in ("thumbnail.*", "icon.*"):
-        for source in profile["mod"]["folder"].glob(pattern):
-            if source.is_file():
-                shutil.copy2(source, version_root / source.name)
+    _copy_legacy_support_files(profile, version_root)
     return version_root
 
 
@@ -1629,11 +1745,17 @@ def legacy_compat_items(profiles):
     for profile in profiles:
         mod = profile["mod"]
         if profile["repairable"]:
+            if profile.get("mode") == "compiled":
+                detail = (profile["reason"] + "\n--repair-legacy compiles the adapter "
+                          "against the installed Managed DLLs, preserves required local "
+                          "assets, and archives the obsolete binary package.")
+            else:
+                detail = (profile["reason"] + "\n--repair-legacy translates Specifications "
+                          "to 1.x Blueprints and preserves the original in __archives.")
             items.append({
                 "sev": "action",
                 "label": f"native migration available for {mod['name']}",
-                "detail": profile["reason"] + "\n--repair-legacy translates Specifications "
-                          "to 1.x Blueprints and preserves the original in __archives.",
+                "detail": detail,
             })
         else:
             items.append({

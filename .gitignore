@@ -5,6 +5,10 @@ __pycache__/
 .venv/
 venv/
 
+# Compatibility adapter build output
+compat/**/bin/
+compat/**/obj/
+
 # mod_doctor scratch / caches (created next to the Mods dir at runtime)
 .ilspy-cache/
 tmp/

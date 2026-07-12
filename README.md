@@ -57,13 +57,16 @@ SUMMARY
 
 ## Install
 
-Requires **Python 3.9+**. The tool works with the standard library alone (plain, no color). For the colored output and the clickable TUI, install the two optional extras:
+Requires **Python 3.9+**. Diagnosis and data-only migration use the standard library
+alone. Colored output and the interactive TUI are optional:
 
 ```bash
-pip install rich textual        # optional: color + interactive TUI
+pip install rich textual
 ```
 
-Then drop `mod_doctor.py` anywhere and run it. No build step, no config file.
+Compiled compatibility adapters additionally require the **.NET 8 SDK** and the full
+repository checkout (the adapter sources live under `compat/`). A standalone copy of
+`mod_doctor.py` still diagnoses compiled legacy mods, but cannot rebuild them.
 
 ## Usage
 
@@ -71,7 +74,7 @@ Then drop `mod_doctor.py` anywhere and run it. No build step, no config file.
 python mod_doctor.py                 # dry run: diagnose + show the plan (TUI if interactive)
 python mod_doctor.py --apply         # perform the fixes: disable -> _BUG, dedup -> __archives
 python mod_doctor.py --repair-legacy   # dry run: plan safe TimberAPI -> native migrations
-python mod_doctor.py --apply --repair-legacy   # migrate supported data-only mods
+python mod_doctor.py --apply --repair-legacy   # migrate supported data and compiled mods
 python mod_doctor.py --plain         # colored, non-interactive summary (titles only)
 python mod_doctor.py --plain --details   # ...with every finding's detail expanded
 python mod_doctor.py --tui           # force the interactive collapsible TUI
@@ -86,7 +89,7 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 | Flag | Effect |
 |---|---|
 | `--apply` | Perform the planned moves and migrations (default is a dry run). |
-| `--repair-legacy` | Translate supported data-only TimberAPI `Specifications` into native 1.x `Blueprints`. With `--apply`, archives the original and creates a separate current-version package. Compiled mods remain report-only. |
+| `--repair-legacy` | Convert supported data-only TimberAPI packages and rebuild bundled compiled adapters against the installed game's DLLs. With `--apply`, archives the original and creates a separate current-version package. Unknown compiled mods remain report-only. |
 | `--plain` / `--tui` | Force plain output / the interactive TUI (default: TUI when the terminal is interactive). |
 | `--details` | In plain mode, print each finding's detail (default: titles only). |
 | `--reports N` | Only the N most recent crash reports (0 = all). |
@@ -97,16 +100,27 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 
 ### Legacy TimberAPI repair
 
-`--repair-legacy` performs a schema migration, not a manifest rename. It reads the
-installed game's `Blueprints.zip`, targets the exact installed build, translates
+`--repair-legacy` performs real format/source migrations, not manifest renames. Every
+output targets the exact installed build.
+
+For data-only packages, it reads the installed game's `Blueprints.zip`, translates
 supported needs, goods, recipes, faction collections, and manufactory recipe patches,
-and deduplicates definitions shared by several legacy packages.
+preserves texture bundles, and deduplicates definitions shared by several packages.
+
+For known compiled packages, it builds the bundled adapter source against the installed
+`Managed` DLLs. The current adapters restore:
+
+- **Draggable Utilities** &mdash; pause/resume, prioritize/deprioritize haulers, and
+  empty/unempty storage across dragged selections.
+- **Growth Overlay** &mdash; hold `Tab` to show growth percentages for growable natural
+  resources, including post-growth yield progress.
 
 | Legacy package | Result |
 |---|---|
-| Data-only `Specifications` | Converted to native `.blueprint.json` files under `version-<installed-game-version>` |
-| Texture-only asset bundle | Preserved under native `AssetBundles/` and its asset paths rewritten |
-| Compiled `EntryDll` using TimberAPI/removed game assemblies | Reported as requiring a source rebuild; never exposed to the native loader |
+| Data-only `Specifications` | Converted to native `.blueprint.json` files under `version-<major.minor>` (e.g. `version-1.0`), with `MinimumGameVersion` set to the exact installed build |
+| Legacy TimberAPI asset bundle | Omitted (old Unity bundles fail on 1.x); icons are remapped to built-in game sprites |
+| Draggable Utilities / Growth Overlay `EntryDll` | Rebuilt from bundled adapter source against the installed game assemblies |
+| Other compiled `EntryDll` using removed APIs | Reported as requiring a source rebuild; never exposed to the native loader |
 | Bundle containing serialized GameObjects/scripts | Reported as requiring a current Unity/source rebuild |
 
 The original package moves to `__archives/YYYYMMDD-N/`. The migrated package uses a
@@ -140,7 +154,7 @@ If your `Documents` folder is redirected, run the tool from inside your Mods fol
 - **Confidence gate** &mdash; auto-applies only high-confidence classes; fragile ones are report-only unless `--force`.
 - **Sync awareness** &mdash; flags Steam/mod.io-synced mods, which re-download on launch unless you also unsubscribe in-game.
 - **Correct load model** &mdash; mirrors the game's own loader: a mod loads from the highest `version-*` folder whose version is `<=` your game, from a real `manifest.json`; dormant/`mod.json`-only/external (BepInEx) folders are recognized and left alone.
-- **Legacy migration gate** &mdash; migrates only data whose 1.x representation is deterministic; compiled DLLs and serialized GameObjects remain report-only because a synthetic manifest would load obsolete code, not port it.
+- **Legacy migration gate** &mdash; data transforms only when the 1.x representation is deterministic; compiled code is rebuilt only through a named, source-controlled adapter. Unknown DLLs and serialized GameObjects remain report-only.
 
 ## How it works (internals)
 

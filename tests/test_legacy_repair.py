@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -94,6 +95,7 @@ class LegacyRepairTests(unittest.TestCase):
         version_root = doctor._convert_legacy_package(profile, destination)
 
         manifest = json.loads((version_root / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(version_root.name, "version-1.0")
         self.assertEqual(manifest["MinimumGameVersion"], "1.0.13.1")
         self.assertTrue((version_root / "Goods/Good.Berries.blueprint.json").exists())
         self.assertTrue((version_root / "Needs/Need.Beaver.Berries.blueprint.json").exists())
@@ -114,6 +116,31 @@ class LegacyRepairTests(unittest.TestCase):
         profile = doctor._legacy_profile(mod)
         self.assertFalse(profile["repairable"])
         self.assertIn("source rebuild", profile["reason"])
+
+    def test_known_compiled_mods_use_bundled_adapters(self):
+        cases = (
+            ("draggable", "kyp.draggable_utils", "DraggableUtils.dll"),
+            ("growth", "tanstaafl.plugins.growthoverlay", "GrowthOverlay.dll"),
+        )
+        for name, unique_id, entry_dll in cases:
+            with self.subTest(unique_id=unique_id):
+                folder, _, mod = self.make_mod(name, unique_id)
+                metadata = json.loads(
+                    (folder / "mod.json").read_text(encoding="utf-8")
+                )
+                metadata["EntryDll"] = entry_dll
+                (folder / "mod.json").write_text(
+                    json.dumps(metadata), encoding="utf-8"
+                )
+                (folder / entry_dll).write_bytes(b"legacy")
+                with mock.patch.object(doctor.shutil, "which", return_value="dotnet"):
+                    profile = doctor._legacy_profile(mod)
+                self.assertTrue(profile["repairable"])
+                self.assertEqual(profile["mode"], "compiled")
+                self.assertTrue(profile["port"]["project_path"].exists())
+                self.assertEqual(
+                    doctor._coordinate_legacy_profiles([profile]), [profile]
+                )
 
     def test_duplicate_legacy_definition_has_one_owner(self):
         _, first_specs, first_mod = self.make_mod(

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <AssemblyName>DraggableUtils</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(ManagedPath)/Timberborn.*.dll" />
+    <Reference Include="$(ManagedPath)/Bindito.*.dll" />
+    <Reference Include="$(ManagedPath)/UnityEngine.*.dll" />
+  </ItemGroup>
+</Project>
