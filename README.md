@@ -70,6 +70,19 @@ repository checkout (the adapter sources live under `compat/`). A standalone cop
 
 ## Usage
 
+The one-shot force mode fixes everything fixable in a single command:
+
+```bash
+python mod_doctor.py --fix           # force mode: apply every available repair NOW
+```
+
+`--fix` (alias `--force-fix`) implies `--apply --repair-legacy --force`: it disables
+crashers, deduplicates, migrates data-only legacy mods, rebuilds bundled compiled
+adapters, and applies the fragile crash classes — no argument stacking. Packages
+that genuinely require an author source rebuild stay reported, never faked.
+
+Fine-grained runs when you want the dry-run-first workflow:
+
 ```bash
 python mod_doctor.py                 # dry run: diagnose + show the plan (TUI if interactive)
 python mod_doctor.py --apply         # perform the fixes: disable -> _BUG, dedup -> __archives
@@ -89,6 +102,7 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 | Flag | Effect |
 |---|---|
 | `--apply` | Perform the planned moves and migrations (default is a dry run). |
+| `--fix` / `--force-fix` | One-shot force mode: `--apply --repair-legacy --force` combined. |
 | `--repair-legacy` | Convert supported data-only TimberAPI packages and rebuild bundled compiled adapters against the installed game's DLLs. With `--apply`, archives the original and creates a separate current-version package. Unknown compiled mods remain report-only. |
 | `--plain` / `--tui` | Force plain output / the interactive TUI (default: TUI when the terminal is interactive). |
 | `--details` | In plain mode, print each finding's detail (default: titles only). |

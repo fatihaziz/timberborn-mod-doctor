@@ -14,6 +14,8 @@ class LegacyRepairTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.old_game = doctor.GAME
         self.old_gamev = doctor.GAMEV
+        self.old_mods = doctor.MODS
+        self.old_er = doctor.ER
         doctor.GAME = self.root / "Timberborn_Data" / "Managed"
         doctor.GAME.mkdir(parents=True)
         doctor.GAMEV = (1, 0, 13, 1)
@@ -27,6 +29,8 @@ class LegacyRepairTests(unittest.TestCase):
     def tearDown(self):
         doctor.GAME = self.old_game
         doctor.GAMEV = self.old_gamev
+        doctor.MODS = self.old_mods
+        doctor.ER = self.old_er
         self.temp.cleanup()
 
     def make_mod(self, name="legacy", unique_id="Legacy.Mod"):
@@ -161,6 +165,54 @@ class LegacyRepairTests(unittest.TestCase):
         self.assertNotIn(filename, profiles[0]["omit_specs"])
         self.assertIn(filename, profiles[1]["omit_specs"])
         self.assertIn("Berries", profiles[1]["omit_needs"])
+
+    def test_fix_flag_applies_legacy_migration_in_one_shot(self):
+        version_file = doctor.GAME.parent / "StreamingAssets" / "Version.txt"
+        version_file.write_text("1.0.13.1-test", encoding="utf-8")
+        mods_dir = self.root / "FixMods"
+        mods_dir.mkdir()
+        legacy = mods_dir / "berries-legacy_1_1.0.0"
+        specs = legacy / "Specifications"
+        specs.mkdir(parents=True)
+        (legacy / "mod.json").write_text(
+            json.dumps(
+                {
+                    "Name": "BerriesLegacy",
+                    "Version": "1.0.0",
+                    "UniqueId": "BerriesLegacy",
+                    "MinimumApiVersion": "0.6.0",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (specs / "NeedSpecification.Beaver.Berries.original.json").write_text(
+            json.dumps(
+                {
+                    "Id": "Berries",
+                    "NeedGroupId": "Nutrition",
+                    "CharacterType": "Beaver",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = doctor.main(
+            [
+                "--fix", "--plain", "--no-crash", "--no-dedup",
+                "--mods", str(mods_dir), "--game", str(doctor.GAME),
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        migrated = mods_dir / "berries-legacy_1_1.0.0__mod_doctor_1.0" / "version-1.0"
+        self.assertTrue((migrated / "manifest.json").exists())
+        self.assertTrue(
+            (migrated / "Needs" / "Need.Beaver.Berries.blueprint.json").exists()
+        )
+        self.assertFalse(legacy.exists())
+        archived = list(mods_dir.glob("__archives/*/berries-legacy_1_1.0.0"))
+        self.assertEqual(len(archived), 1)
+
 
 
 if __name__ == "__main__":

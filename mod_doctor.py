@@ -1772,6 +1772,9 @@ def legacy_compat_items(profiles):
 # --------------------------------------------------------------------------- #
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Timberborn mod crash triage + compatibility repair")
+    ap.add_argument("--fix", "--force-fix", action="store_true", dest="fix",
+                    help="one-shot force mode: apply every available repair now "
+                         "(implies --apply --repair-legacy --force)")
     ap.add_argument("--apply", action="store_true",
                     help="perform planned moves/migrations (default: dry run)")
     ap.add_argument("--reports", type=int, default=0,
@@ -1791,6 +1794,8 @@ def main(argv=None):
                     help="translate supported data-only TimberAPI Specifications into native "
                          "Blueprints for the installed game; compiled mods remain report-only")
     args = ap.parse_args(argv)
+    if args.fix:
+        args.apply = args.repair_legacy = args.force = True
     if args.mods or args.game:
         global MODS, ER, GAME, GAMEV
         MODS, ER, GAME = resolve_paths(args.mods, args.game)
