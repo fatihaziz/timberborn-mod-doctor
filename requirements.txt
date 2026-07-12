@@ -1,0 +1,4 @@
+# Optional -- the tool runs on the standard library alone (plain, no color).
+# Install these for colored output and the interactive clickable TUI:
+rich>=13.0
+textual>=0.60

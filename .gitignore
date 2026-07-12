@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# mod_doctor scratch / caches (created next to the Mods dir at runtime)
+.ilspy-cache/
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db

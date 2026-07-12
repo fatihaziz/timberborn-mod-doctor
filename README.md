@@ -1,0 +1,132 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="mod doctor" width="620">
+</p>
+
+<p align="center">
+  <b>A single-file triage tool for Timberborn mod crashes.</b><br>
+  Reads the game's crash reports, names the culprit mod, and safely disables or de-duplicates it &mdash; with a clickable terminal UI.
+</p>
+
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Dependencies" src="https://img.shields.io/badge/deps-stdlib%20(rich%2Ftextual%20optional)-blueviolet">
+</p>
+
+---
+
+## What it does
+
+After a Timberborn update, one incompatible mod throws the *first uncaught exception* and the game won't load. Fix it, relaunch, and the **next** broken mod surfaces &mdash; endless whack-a-mole. `mod_doctor` ends it in one pass:
+
+1. **Reads** the crash reports (`error-report-*.zip`) &mdash; or the live `Player.log` if you've cleared them.
+2. **Classifies** each crash into a known class (see below).
+3. **Resolves** the culprit against the mods the game *actually* loads (correct `version-*` folder, real `manifest.json`).
+4. **Plans a safe fix** &mdash; disable a broken mod, or remove the older copy of a duplicated mod &mdash; and only performs it with `--apply`.
+
+Plus a proactive **AssemblyRef compatibility scan** (reads each mod DLL's real assembly references, ECMA-335) that flags mods needing a game assembly your build lacks *before* the game even crashes.
+
+> **Safe by default.** Running with no arguments is a dry run: it prints the plan and changes nothing. Nothing is ever hard-deleted &mdash; disabled mods move to `_BUG/`, duplicates to `__archives/YYYYMMDD-N/`, both fully recoverable.
+
+## Preview
+
+Default run in a real terminal opens a **clickable TUI** &mdash; each finding shows only its title; click (or press `e`) to expand the detail. Piped or with `--plain` it prints a colored, numbered summary:
+
+```text
+Mods dir     : ~/Documents/Timberborn/Mods
+Error reports: ~/Documents/Timberborn/Error reports
+Game managed : .../Timberborn/Timberborn_Data/Managed  (found)
+Game version : 1.0.13.1
+Mod folders  : 84 present, 84 loaded by the game
+
+GAME COMPATIBILITY (AssemblyRef scan)
+   1. no missing GAME assembly on game 1.0.13.1
+   2. soft: SomeFramework.Core missing        # lazy-bound: install that dependency mod
+
+CRASH TRIAGE
+   3. missing_asm/high - ReflectionTypeLoadException / missing assembly 'X'
+
+ACTIONS PLANNED (dry-run; --apply to perform)
+   4. will move BrokenMod -> _BUG
+
+SUMMARY
+   5. disable 1 | dedup 0 | stale 0 | manual 0 | transient 0
+   6. Re-run with --apply to perform these.
+```
+
+## Install
+
+Requires **Python 3.9+**. The tool works with the standard library alone (plain, no color). For the colored output and the clickable TUI, install the two optional extras:
+
+```bash
+pip install rich textual        # optional: color + interactive TUI
+```
+
+Then drop `mod_doctor.py` anywhere and run it. No build step, no config file.
+
+## Usage
+
+```bash
+python mod_doctor.py                 # dry run: diagnose + show the plan (TUI if interactive)
+python mod_doctor.py --apply         # perform the fixes: disable -> _BUG, dedup -> __archives
+python mod_doctor.py --plain         # colored, non-interactive summary (titles only)
+python mod_doctor.py --plain --details   # ...with every finding's detail expanded
+python mod_doctor.py --tui           # force the interactive collapsible TUI
+python mod_doctor.py --reports 1     # only triage the newest crash report
+python mod_doctor.py --force         # also auto-apply the fragile crash classes
+```
+
+In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
+
+### Flags
+
+| Flag | Effect |
+|---|---|
+| `--apply` | Perform the moves (default is a dry run). |
+| `--plain` / `--tui` | Force plain output / the interactive TUI (default: TUI when the terminal is interactive). |
+| `--details` | In plain mode, print each finding's detail (default: titles only). |
+| `--reports N` | Only the N most recent crash reports (0 = all). |
+| `--no-dedup` / `--no-crash` | Skip duplicate cleanup / crash triage. |
+| `--force` | Also auto-apply low-confidence classes (spec-key, missing-method). |
+| `--mods PATH` | Timberborn Mods dir (overrides auto-detection). |
+| `--game PATH` | Timberborn install or its `Managed` dir (overrides auto-detection). |
+
+### Path detection
+
+`mod_doctor` finds your install automatically, in priority order:
+
+- **Mods dir:** `$TIMBERBORN_MODS` &rarr; the current directory if it looks like a Mods folder &rarr; `~/Documents/Timberborn/Mods`.
+- **Game dir:** `$TIMBERBORN_GAME` &rarr; the `Mono path[0]` the game recorded in its logs &rarr; common Steam library locations.
+
+If your `Documents` folder is redirected, run the tool from inside your Mods folder, pass `--mods`, or set `TIMBERBORN_MODS`.
+
+## Crash classes it recognizes
+
+| Class | Signature | Typical fix |
+|---|---|---|
+| **Harmony patch/transpiler** | `Failed to apply <X> transpiler` / `Patching exception` | Relocate; wait for an updated build (the mod is named in the trace). |
+| **Missing assembly** (`ReflectionTypeLoadException`) | `Could not load file or assembly '<Name>'` from `GetModStarters` | Install the `RequiredMods` dependency, or relocate the dependent. |
+| **Changed game API** (`MissingMethodException`) | `Method not found: <ret> <Type>.<Method>(...)` | Relocate; the mod was built against a different game build. |
+| **Blueprint spec-key** (`ArgumentException`) | `No type found for key <XxxSpec>` | Delete the stale key from the blueprint JSON (durable installs only), else relocate. |
+| **Duplicate mod Id** | `An item with the same key has already been added. Key: <Id>` via `ToDictionary` | Keep the higher loadable version, archive the other. |
+| **Version mismatch** (AssemblyRef scan) | a mod needs a `Timberborn.*` assembly your build lacks | Align the game version; don't disable foundational mods. |
+
+## How it stays safe
+
+- **Cascade guard** &mdash; never auto-disables a mod that other active mods list in `RequiredMods` (foundational deps like a UI framework); it reports instead.
+- **Confidence gate** &mdash; auto-applies only high-confidence classes; fragile ones are report-only unless `--force`.
+- **Sync awareness** &mdash; flags Steam/mod.io-synced mods, which re-download on launch unless you also unsubscribe in-game.
+- **Correct load model** &mdash; mirrors the game's own loader: a mod loads from the highest `version-*` folder whose version is `<=` your game, from a real `manifest.json`; dormant/`mod.json`-only/external (BepInEx) folders are recognized and left alone.
+
+## How it works (internals)
+
+- Crash text is matched to a class, then the culprit is resolved against **loaded** mod DLLs only (not dormant `version-*` dirs), using distinctive type/assembly names from the game's own metadata.
+- The compatibility scan parses each DLL's **AssemblyRef table** directly (a compact ECMA-335 reader) &mdash; authoritative, unlike a byte-substring, and it never mistakes a namespace string for an assembly.
+- The game version is read from `Timberborn_Data/StreamingAssets/version.txt` (authoritative), falling back to the crash reports.
+
+## License
+
+MIT &mdash; see [LICENSE](LICENSE).
+
+> Not affiliated with Mechanistry. "Timberborn" is a trademark of its respective owner. This is a fan-made, unofficial tool.

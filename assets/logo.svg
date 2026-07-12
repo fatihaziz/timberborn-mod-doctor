@@ -1,0 +1,50 @@
+<svg width="760" height="240" viewBox="0 0 760 240" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="mod doctor - Timberborn mod crash triage and repair">
+  <defs>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0a86a"/>
+      <stop offset="1" stop-color="#c8804a"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- Emblem: wooden badge holding a diagnostic terminal -->
+  <g filter="url(#soft)">
+    <rect x="30" y="34" width="172" height="172" rx="30" fill="url(#wood)"/>
+    <rect x="30" y="34" width="172" height="172" rx="30" fill="none" stroke="#a5632f" stroke-width="3"/>
+    <!-- terminal -->
+    <rect x="50" y="54" width="132" height="132" rx="16" fill="#1e2127"/>
+    <!-- title bar dots -->
+    <circle cx="68" cy="74" r="5" fill="#e06c75"/>
+    <circle cx="86" cy="74" r="5" fill="#e5c07b"/>
+    <circle cx="104" cy="74" r="5" fill="#98c379"/>
+    <!-- log lines: ok / warn / crash -->
+    <g stroke-linecap="round" stroke-width="6">
+      <path d="M66 104 l8 8 l14 -16" stroke="#98c379" fill="none"/>
+      <line x1="98" y1="106" x2="164" y2="106" stroke="#3a3f4b"/>
+      <line x1="66" y1="132" x2="82" y2="132" stroke="#e5c07b"/>
+      <line x1="90" y1="132" x2="150" y2="132" stroke="#3a3f4b"/>
+      <path d="M66 154 l14 14 M80 154 l-14 14" stroke="#e06c75" fill="none"/>
+      <line x1="98" y1="161" x2="150" y2="161" stroke="#3a3f4b"/>
+    </g>
+  </g>
+  <!-- medical cross badge (the "doctor") -->
+  <g filter="url(#soft)">
+    <circle cx="186" cy="182" r="30" fill="#2aa7b8"/>
+    <circle cx="186" cy="182" r="30" fill="none" stroke="#1c7f8d" stroke-width="3"/>
+    <g fill="#ffffff">
+      <rect x="180" y="167" width="12" height="30" rx="3"/>
+      <rect x="171" y="176" width="30" height="12" rx="3"/>
+    </g>
+  </g>
+
+  <!-- Wordmark -->
+  <g font-family="'Segoe UI', 'Trebuchet MS', Verdana, sans-serif">
+    <text x="238" y="126" font-size="72" font-weight="800" letter-spacing="-1">
+      <tspan fill="#e0a86a">mod</tspan><tspan fill="#2aa7b8"> doctor</tspan>
+    </text>
+    <text x="240" y="164" font-size="23" font-weight="600" fill="#8a94a6">Timberborn mod crash triage &amp; repair</text>
+    <text x="240" y="194" font-size="16" font-weight="500" fill="#6b7280" letter-spacing="0.5">diagnose &#183; classify &#183; fix &#183; verify</text>
+  </g>
+</svg>
