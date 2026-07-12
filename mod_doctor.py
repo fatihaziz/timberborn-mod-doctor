@@ -1290,11 +1290,12 @@ Collapsible { border: none; padding: 0 0 0 1; }
 """
 
 
-def _build_tui_app(meta, sections, pending=0):
+def _build_tui_app(meta, sections, pending=0, dead=0):
     """Construct (but don't run) the Textual review app -- factory-style so it can be
-    exercised headlessly via App.run_test(). `pending` = plannable actions not yet
-    applied; when > 0 the app shows a FIX ALL NOW button (and the f binding) that
-    exits with .fix_requested = True so the caller applies and re-renders."""
+    exercised headlessly via App.run_test(). The action bar always offers the next
+    real step: apply `pending` planned actions, else archive `dead` unfixable
+    packages, else report all-clean. The chosen request is exposed on .request
+    ("fix" | "archive" | None) after exit."""
     from textual.app import App
     from textual.containers import VerticalScroll
     from textual.widgets import Header, Footer, Static, Collapsible, Button
@@ -1305,18 +1306,21 @@ def _build_tui_app(meta, sections, pending=0):
         CSS = _TUI_CSS
         BINDINGS = [("q", "quit", "Quit"), ("e", "expand_all", "Expand all"),
                     ("c", "collapse_all", "Collapse all"),
-                    ("f", "fix_all", "FIX ALL NOW")]
-        fix_requested = False
+                    ("f", "fix_all", "Fix/Archive now")]
+        request = None
 
         def compose(self):
             yield Header()
             if pending:
                 yield Button(f"FIX ALL NOW  --  apply {pending} pending action(s)",
                              id="fix", variant="error", classes="fixbar")
+            elif dead:
+                yield Button(f"ARCHIVE {dead} DEAD PACKAGE(S)  --  unfixable, "
+                             "unloadable; moves them to __archives (recoverable)",
+                             id="fix", variant="warning", classes="fixbar")
             else:
-                yield Static("  nothing left to auto-fix -- remaining findings need "
-                             "an author/source rebuild", markup=False,
-                             classes="fixdone")
+                yield Static("  all clean -- nothing to fix, nothing dead",
+                             markup=False, classes="fixdone")
             with VerticalScroll():
                 for line in meta:
                     yield Static(line, markup=False, classes="meta")
@@ -1341,8 +1345,12 @@ def _build_tui_app(meta, sections, pending=0):
 
         def action_fix_all(self):
             if pending:
-                self.fix_requested = True
-                self.exit()
+                self.request = "fix"
+            elif dead:
+                self.request = "archive"
+            else:
+                return
+            self.exit()
 
         def action_expand_all(self):
             for cw in self.query(Collapsible):
@@ -1355,11 +1363,11 @@ def _build_tui_app(meta, sections, pending=0):
     return DoctorTUI()
 
 
-def render_tui(meta, sections, pending=0):
-    """Run the TUI; True when the user pressed FIX ALL NOW."""
-    app = _build_tui_app(meta, sections, pending)
+def render_tui(meta, sections, pending=0, dead=0):
+    """Run the TUI; returns "fix", "archive", or None."""
+    app = _build_tui_app(meta, sections, pending, dead)
     app.run()
-    return app.fix_requested
+    return app.request
 
 
 # --------------------------------------------------------------------------- #
@@ -1950,8 +1958,14 @@ def main(argv=None):
             pending += len(repairable)
 
         if _use_tui(args):
-            if render_tui(meta, sections, pending):
-                args.apply = args.repair_legacy = args.force = True
+            dead = 0 if args.archive_dead else len(unfixable)
+            request = render_tui(meta, sections, pending, dead)
+            if request:
+                args.apply = args.force = True
+                if request == "archive":
+                    args.archive_dead = True
+                else:
+                    args.repair_legacy = True
                 continue
         else:
             render_plain(meta, sections, args.details)
