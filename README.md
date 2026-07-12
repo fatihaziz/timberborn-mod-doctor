@@ -70,6 +70,8 @@ Then drop `mod_doctor.py` anywhere and run it. No build step, no config file.
 ```bash
 python mod_doctor.py                 # dry run: diagnose + show the plan (TUI if interactive)
 python mod_doctor.py --apply         # perform the fixes: disable -> _BUG, dedup -> __archives
+python mod_doctor.py --drop-legacy   # dry run: list unloadable TimberAPI mod.json mods
+python mod_doctor.py --apply --drop-legacy   # archive those legacy mods (does not port them)
 python mod_doctor.py --plain         # colored, non-interactive summary (titles only)
 python mod_doctor.py --plain --details   # ...with every finding's detail expanded
 python mod_doctor.py --tui           # force the interactive collapsible TUI
@@ -84,6 +86,7 @@ In the TUI: **click a row** (or `e`/`c`) to expand/collapse, `q` to quit.
 | Flag | Effect |
 |---|---|
 | `--apply` | Perform the moves (default is a dry run). |
+| `--drop-legacy` | Include unloadable legacy TimberAPI `mod.json` mods in the archive plan. Requires `--apply` to move them; never converts their binaries to native mods. |
 | `--plain` / `--tui` | Force plain output / the interactive TUI (default: TUI when the terminal is interactive). |
 | `--details` | In plain mode, print each finding's detail (default: titles only). |
 | `--reports N` | Only the N most recent crash reports (0 = all). |
@@ -118,6 +121,7 @@ If your `Documents` folder is redirected, run the tool from inside your Mods fol
 - **Confidence gate** &mdash; auto-applies only high-confidence classes; fragile ones are report-only unless `--force`.
 - **Sync awareness** &mdash; flags Steam/mod.io-synced mods, which re-download on launch unless you also unsubscribe in-game.
 - **Correct load model** &mdash; mirrors the game's own loader: a mod loads from the highest `version-*` folder whose version is `<=` your game, from a real `manifest.json`; dormant/`mod.json`-only/external (BepInEx) folders are recognized and left alone.
+- **Legacy TimberAPI guard** &mdash; `--drop-legacy` archives `mod.json`-only mods under `__archives/YYYYMMDD-N/`; it does not generate a misleading native manifest or attempt to port binaries compiled for obsolete APIs.
 
 ## How it works (internals)
 
